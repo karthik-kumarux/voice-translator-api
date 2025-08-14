@@ -22,7 +22,7 @@ app.add_middleware(
 
 # Load models
 print("Loading Whisper model...")
-whisper_model = whisper.load_model("base")
+whisper_model = whisper.load_model("tiny")
 
 # Hugging Face API configuration
 HF_API_URL = "https://api-inference.huggingface.co/models/facebook/nllb-200-distilled-600M"
