@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import whisper
+import openai
 import tempfile
 import os
 import io
@@ -20,9 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load models
-print("Loading Whisper model...")
-whisper_model = whisper.load_model("tiny")
+# OpenAI API configuration
+openai.api_key = os.environ.get("OPENAI_API_KEY", "")
+print("Using OpenAI Whisper API")
 
 # Hugging Face API configuration
 HF_API_URL = "https://api-inference.huggingface.co/models/facebook/nllb-200-distilled-600M"
@@ -63,12 +63,16 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         print(f"Saved temp file: {temp_file_path}")
         print(f"File size: {os.path.getsize(temp_file_path)} bytes")
         
-        # Transcribe audio
+        # Transcribe audio using OpenAI API
         print("Starting transcription...")
-        result = whisper_model.transcribe(temp_file_path)
-        print(f"Transcription result: {result['text']}")
+        if not openai.api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+            
+        with open(temp_file_path, "rb") as audio_file:
+            transcript = openai.Audio.transcribe("whisper-1", audio_file)
         
-        return {"text": result['text']}
+        print(f"Transcription result: {transcript.text}")
+        return {"text": transcript.text}
     
     except Exception as e:
         print(f"Error during transcription: {str(e)}")
@@ -194,8 +198,13 @@ async def full_translation_pipeline(audio: UploadFile = File(...), source_lang: 
             temp_file_path = temp_file.name
         
         print("Step 1: Transcribing audio...")
-        result = whisper_model.transcribe(temp_file_path)
-        original_text = result['text']
+        if not openai.api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+            
+        with open(temp_file_path, "rb") as audio_file:
+            transcript = openai.Audio.transcribe("whisper-1", audio_file)
+        
+        original_text = transcript.text
         print(f"Transcribed: {original_text}")
         
         # Step 2: Translation
