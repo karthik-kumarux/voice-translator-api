@@ -7,8 +7,7 @@ import tempfile
 import os
 import io
 from gtts import gTTS
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import torch
+import requests
 
 app = FastAPI(title="Voice Assistant API", version="1.0.0")
 
@@ -25,15 +24,11 @@ app.add_middleware(
 print("Loading Whisper model...")
 whisper_model = whisper.load_model("base")
 
-print("Loading NLLB translation model...")
-nllb_model_path = "./nllb-200-distilled-600M"
-tokenizer = AutoTokenizer.from_pretrained(nllb_model_path)
-translation_model = AutoModelForSeq2SeqLM.from_pretrained(nllb_model_path)
-
-# Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-translation_model.to(device)
-print(f"Models loaded on device: {device}")
+# Hugging Face API configuration
+HF_API_URL = "https://api-inference.huggingface.co/models/facebook/nllb-200-distilled-600M"
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+print("Using Hugging Face API for translation")
 
 # Pydantic models
 class TTSRequest(BaseModel):
@@ -126,26 +121,28 @@ async def health_check():
 
 @app.post("/translate")
 async def translate_text(request: TranslateRequest):
-    """Translate text using NLLB model"""
+    """Translate text using Hugging Face API"""
     try:
         print(f"Translation request: {request.text[:50]}... ({request.source_lang} -> {request.target_lang})")
         
-        # Set source language
-        tokenizer.src_lang = request.source_lang
+        if not HF_TOKEN:
+            raise HTTPException(status_code=500, detail="HF_TOKEN environment variable not set")
+            
+        payload = {
+            "inputs": request.text,
+            "parameters": {
+                "src_lang": request.source_lang,
+                "tgt_lang": request.target_lang
+            }
+        }
         
-        # Tokenize input
-        inputs = tokenizer(request.text, return_tensors="pt").to(device)
+        response = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload)
+        result = response.json()
         
-        # Generate translation
-        with torch.no_grad():
-            generated_tokens = translation_model.generate(
-                **inputs,
-                forced_bos_token_id=tokenizer.lang_code_to_id[request.target_lang],
-                max_length=512
-            )
-        
-        # Decode translation
-        translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+        if isinstance(result, list) and len(result) > 0:
+            translated_text = result[0].get('translation_text', request.text)
+        else:
+            translated_text = request.text
         
         print(f"Translation result: {translated_text}")
         
@@ -203,17 +200,24 @@ async def full_translation_pipeline(audio: UploadFile = File(...), source_lang: 
         
         # Step 2: Translation
         print("Step 2: Translating text...")
-        tokenizer.src_lang = source_lang
-        inputs = tokenizer(original_text, return_tensors="pt").to(device)
-        
-        with torch.no_grad():
-            generated_tokens = translation_model.generate(
-                **inputs,
-                forced_bos_token_id=tokenizer.lang_code_to_id[target_lang],
-                max_length=512
-            )
-        
-        translated_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+        if not HF_TOKEN:
+            translated_text = original_text
+        else:
+            payload = {
+                "inputs": original_text,
+                "parameters": {
+                    "src_lang": source_lang,
+                    "tgt_lang": target_lang
+                }
+            }
+            
+            response = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload)
+            result = response.json()
+            
+            if isinstance(result, list) and len(result) > 0:
+                translated_text = result[0].get('translation_text', original_text)
+            else:
+                translated_text = original_text
         print(f"Translated: {translated_text}")
         
         # Step 3: TTS (Text to Speech)
