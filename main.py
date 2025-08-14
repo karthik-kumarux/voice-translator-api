@@ -7,11 +7,10 @@ import os
 import io
 from gtts import gTTS
 import requests
-import openai
+import time
 
 app = FastAPI(title="Voice Translation API", version="1.0.0")
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,10 +24,11 @@ HF_API_URL = "https://api-inference.huggingface.co/models/facebook/nllb-200-dist
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-openai.api_key = os.environ.get("OPENAI_API_KEY", "")
+ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY", "")
+ASSEMBLYAI_HEADERS = {"authorization": ASSEMBLYAI_API_KEY}
+
 print("Voice Translation API ready")
 
-# Pydantic models
 class TranslateRequest(BaseModel):
     text: str
     source_lang: str = "eng_Latn"
@@ -60,8 +60,8 @@ async def health_check():
 async def transcribe_audio(audio: UploadFile = File(...)):
     temp_file_path = None
     try:
-        if not openai.api_key:
-            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+        if not ASSEMBLYAI_API_KEY:
+            raise HTTPException(status_code=500, detail="ASSEMBLYAI_API_KEY not set")
             
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
             content = await audio.read()
@@ -69,10 +69,45 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             temp_file.flush()
             temp_file_path = temp_file.name
             
-        with open(temp_file_path, "rb") as audio_file:
-            transcript = openai.Audio.transcribe("whisper-1", audio_file)
+        # Upload file to AssemblyAI
+        with open(temp_file_path, "rb") as f:
+            upload_response = requests.post(
+                "https://api.assemblyai.com/v2/upload",
+                files={"file": f},
+                headers=ASSEMBLYAI_HEADERS
+            )
         
-        return {"text": transcript.text}
+        audio_url = upload_response.json()["upload_url"]
+        
+        # Request transcription
+        transcript_request = {
+            "audio_url": audio_url,
+            "language_detection": True
+        }
+        
+        transcript_response = requests.post(
+            "https://api.assemblyai.com/v2/transcript",
+            json=transcript_request,
+            headers=ASSEMBLYAI_HEADERS
+        )
+        
+        transcript_id = transcript_response.json()["id"]
+        
+        # Poll for completion
+        while True:
+            transcript_result = requests.get(
+                f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+                headers=ASSEMBLYAI_HEADERS
+            )
+            
+            result = transcript_result.json()
+            
+            if result["status"] == "completed":
+                return {"text": result["text"]}
+            elif result["status"] == "error":
+                raise HTTPException(status_code=500, detail="Transcription failed")
+            
+            time.sleep(2)
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -132,19 +167,54 @@ async def text_to_speech(request: TTSRequest):
 async def full_translation_pipeline(audio: UploadFile = File(...), source_lang: str = "eng_Latn", target_lang: str = "spa_Latn", tts_lang: str = "es"):
     temp_file_path = None
     try:
-        if not openai.api_key or not HF_TOKEN:
+        if not ASSEMBLYAI_API_KEY or not HF_TOKEN:
             raise HTTPException(status_code=500, detail="API keys not configured")
             
-        # Step 1: STT
+        # Step 1: STT with AssemblyAI
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
             content = await audio.read()
             temp_file.write(content)
             temp_file.flush()
             temp_file_path = temp_file.name
+            
+        with open(temp_file_path, "rb") as f:
+            upload_response = requests.post(
+                "https://api.assemblyai.com/v2/upload",
+                files={"file": f},
+                headers=ASSEMBLYAI_HEADERS
+            )
         
-        with open(temp_file_path, "rb") as audio_file:
-            transcript = openai.Audio.transcribe("whisper-1", audio_file)
-        original_text = transcript.text
+        audio_url = upload_response.json()["upload_url"]
+        
+        transcript_request = {
+            "audio_url": audio_url,
+            "language_detection": True
+        }
+        
+        transcript_response = requests.post(
+            "https://api.assemblyai.com/v2/transcript",
+            json=transcript_request,
+            headers=ASSEMBLYAI_HEADERS
+        )
+        
+        transcript_id = transcript_response.json()["id"]
+        
+        # Poll for completion
+        while True:
+            transcript_result = requests.get(
+                f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+                headers=ASSEMBLYAI_HEADERS
+            )
+            
+            result = transcript_result.json()
+            
+            if result["status"] == "completed":
+                original_text = result["text"]
+                break
+            elif result["status"] == "error":
+                raise HTTPException(status_code=500, detail="Transcription failed")
+            
+            time.sleep(2)
         
         # Step 2: Translation
         payload = {
